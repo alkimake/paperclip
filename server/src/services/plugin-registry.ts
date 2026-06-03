@@ -1,4 +1,4 @@
-import { asc, eq, ne, sql, and, isNull } from "drizzle-orm";
+import { asc, eq, ne, sql, and, isNull, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   plugins,
@@ -44,10 +44,24 @@ function isPluginKeyConflict(error: unknown): boolean {
   return err.code === "23505" && constraint === "plugins_plugin_key_idx";
 }
 
-function pluginConfigScopeCondition(pluginId: string, companyId?: string | null) {
+function pluginConfigExactScopeCondition(pluginId: string, companyId?: string | null) {
   return and(
     eq(pluginConfig.pluginId, pluginId),
     companyId ? eq(pluginConfig.companyId, companyId) : isNull(pluginConfig.companyId),
+  );
+}
+
+function pluginConfigReadScopeCondition(pluginId: string, companyId?: string | null) {
+  if (!companyId) {
+    return pluginConfigExactScopeCondition(pluginId, null);
+  }
+
+  return and(
+    eq(pluginConfig.pluginId, pluginId),
+    or(
+      eq(pluginConfig.companyId, companyId),
+      isNull(pluginConfig.companyId),
+    ),
   );
 }
 
@@ -292,7 +306,12 @@ export function pluginRegistryService(db: Db) {
       db
         .select()
         .from(pluginConfig)
-        .where(pluginConfigScopeCondition(pluginId, companyId))
+        .where(pluginConfigReadScopeCondition(pluginId, companyId))
+        .orderBy(
+          companyId
+            ? sql`case when ${pluginConfig.companyId} = ${companyId} then 0 else 1 end`
+            : sql`0`,
+        )
         .then((rows) => rows[0] ?? null),
 
     /**
@@ -307,7 +326,7 @@ export function pluginRegistryService(db: Db) {
       const existing = await db
         .select()
         .from(pluginConfig)
-        .where(pluginConfigScopeCondition(pluginId, companyId))
+        .where(pluginConfigExactScopeCondition(pluginId, companyId))
         .then((rows) => rows[0] ?? null);
 
       if (existing) {
@@ -318,7 +337,7 @@ export function pluginRegistryService(db: Db) {
             lastError: null,
             updatedAt: new Date(),
           })
-          .where(pluginConfigScopeCondition(pluginId, companyId))
+          .where(pluginConfigExactScopeCondition(pluginId, companyId))
           .returning()
           .then((rows) => rows[0]);
       }
@@ -345,7 +364,7 @@ export function pluginRegistryService(db: Db) {
       const existing = await db
         .select()
         .from(pluginConfig)
-        .where(pluginConfigScopeCondition(pluginId, companyId))
+        .where(pluginConfigExactScopeCondition(pluginId, companyId))
         .then((rows) => rows[0] ?? null);
 
       if (existing) {
@@ -357,7 +376,7 @@ export function pluginRegistryService(db: Db) {
             lastError: null,
             updatedAt: new Date(),
           })
-          .where(pluginConfigScopeCondition(pluginId, companyId))
+          .where(pluginConfigExactScopeCondition(pluginId, companyId))
           .returning()
           .then((rows) => rows[0]);
       }
@@ -381,7 +400,7 @@ export function pluginRegistryService(db: Db) {
       const rows = await db
         .update(pluginConfig)
         .set({ lastError, updatedAt: new Date() })
-        .where(pluginConfigScopeCondition(pluginId, companyId))
+        .where(pluginConfigExactScopeCondition(pluginId, companyId))
         .returning();
 
       if (rows.length === 0) throw notFound("Plugin config not found");
@@ -392,7 +411,7 @@ export function pluginRegistryService(db: Db) {
     deleteConfig: async (pluginId: string, companyId?: string | null) => {
       const rows = await db
         .delete(pluginConfig)
-        .where(pluginConfigScopeCondition(pluginId, companyId))
+        .where(pluginConfigExactScopeCondition(pluginId, companyId))
         .returning();
 
       return rows[0] ?? null;

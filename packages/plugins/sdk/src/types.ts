@@ -1510,6 +1510,7 @@ export interface AgentSession {
 export interface AgentSessionEvent {
   sessionId: string;
   runId: string;
+  companyId?: string | null;
   seq: number;
   /** The kind of event: "chunk" for output data, "status" for run state changes, "done" for end-of-stream, "error" for failures. */
   eventType: "chunk" | "status" | "done" | "error";

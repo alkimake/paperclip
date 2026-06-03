@@ -79,6 +79,8 @@ import {
 import { secretService } from "../services/secrets.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
 /** Launcher declaration extracted from plugin manifest */
@@ -689,6 +691,30 @@ export function pluginRoutes(
     }
 
     return null;
+  }
+
+  async function upsertPluginConfigWithSecretRefs(
+    pluginId: string,
+    configJson: Record<string, unknown>,
+    companyId: string | null,
+    secretRefsByPath: Map<string, Set<string>>,
+  ) {
+    return db.transaction(async (tx) => {
+      const txRegistry = pluginRegistryService(tx as unknown as Db);
+      if (companyId) {
+        const refs = [...secretRefsByPath.entries()].flatMap(([secretId, paths]) =>
+          [...paths].map((configPath) => ({ secretId, configPath })),
+        );
+        await secrets.syncSecretRefsForTarget(
+          companyId,
+          { targetType: "plugin", targetId: pluginId },
+          refs,
+          { db: tx as DbTransaction },
+        );
+      }
+
+      return txRegistry.upsertConfig(pluginId, { configJson }, companyId);
+    });
   }
 
   function assertPluginBridgeScope(req: Request, companyId: unknown): string | undefined {
@@ -2201,20 +2227,12 @@ export function pluginRoutes(
         res.status(422).json({ error: "Plugin secret references require companyId" });
         return;
       }
-      if (companyId) {
-        const refs = [...secretRefsByPath.entries()].flatMap(([secretId, paths]) =>
-          [...paths].map((configPath) => ({ secretId, configPath })),
-        );
-        await secrets.syncSecretRefsForTarget(
-          companyId,
-          { targetType: "plugin", targetId: plugin.id },
-          refs,
-        );
-      }
-
-      const result = await registry.upsertConfig(plugin.id, {
-        configJson: body.configJson,
-      }, companyId);
+      const result = await upsertPluginConfigWithSecretRefs(
+        plugin.id,
+        body.configJson,
+        companyId,
+        secretRefsByPath,
+      );
       await logPluginMutationActivity(req, "plugin.config.updated", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,

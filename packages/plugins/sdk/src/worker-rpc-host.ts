@@ -168,6 +168,16 @@ interface RuntimeCompanyContext {
   companyId?: string | null;
 }
 
+function runtimeCompanyParams(
+  params: { companyId?: string | null } | undefined,
+  fallbackCompanyId: string | null | undefined,
+): { companyId?: string | null } {
+  if (params && Object.prototype.hasOwnProperty.call(params, "companyId")) {
+    return { companyId: params.companyId };
+  }
+  return fallbackCompanyId == null ? {} : { companyId: fallbackCompanyId };
+}
+
 // ---------------------------------------------------------------------------
 // Internal: event registration
 // ---------------------------------------------------------------------------
@@ -411,6 +421,11 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
   // -----------------------------------------------------------------------
 
   function buildContext(): PluginContext {
+    const currentCompanyId = () =>
+      runtimeCompanyContext.getStore()?.companyId ??
+      invocationContextStorage.getStore()?.scope.companyId ??
+      null;
+
     return {
       get manifest() {
         if (!manifest) throw new Error("Plugin context accessed before initialization");
@@ -419,9 +434,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
       config: {
         async get(params) {
-          const companyId =
-            params?.companyId ?? runtimeCompanyContext.getStore()?.companyId ?? null;
-          return callHost("config.get", companyId ? { companyId } : {});
+          return callHost("config.get", runtimeCompanyParams(
+            params,
+            currentCompanyId(),
+          ));
         },
       },
 
@@ -572,8 +588,16 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
       secrets: {
         async resolve(secretRef: string, companyId?: string | null): Promise<string> {
-          const scopedCompanyId = companyId ?? runtimeCompanyContext.getStore()?.companyId ?? null;
-          return callHost("secrets.resolve", { secretRef, companyId: scopedCompanyId });
+          const providedCompanyParams = arguments.length > 1
+            ? { companyId }
+            : undefined;
+          return callHost("secrets.resolve", {
+            secretRef,
+            ...runtimeCompanyParams(
+              providedCompanyParams,
+              currentCompanyId(),
+            ),
+          });
         },
       },
 
@@ -1779,7 +1803,21 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       if (notif.method === "agents.sessions.event" && notif.params) {
         const event = notif.params as AgentSessionEvent;
         const cb = sessionEventCallbacks.get(event.sessionId);
-        if (cb) cb(event);
+        if (cb) {
+          Promise.resolve(
+            runNotification(() =>
+              runtimeCompanyContext.run(
+                { companyId: event.companyId ?? null },
+                () => cb(event),
+              ),
+            ),
+          ).catch((err) => {
+            notifyHost("log", {
+              level: "error",
+              message: `Failed to handle agent session event: ${err instanceof Error ? err.message : String(err)}`,
+            });
+          });
+        }
       } else if (notif.method === "onEvent" && notif.params) {
         // Plugin event bus notifications — dispatch to registered event handlers
         Promise.resolve(runNotification(() => handleOnEvent(notif.params as OnEventParams))).catch((err) => {

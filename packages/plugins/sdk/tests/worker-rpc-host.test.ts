@@ -354,66 +354,273 @@ describe("startWorkerRpcHost runtime company context", () => {
     });
 
     const host = startWorkerRpcHost({ plugin, stdin, stdout });
+    try {
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          manifest: { id: "test-plugin", name: "test-plugin", version: "1.0.0" },
+          config: {},
+          instanceInfo: { instanceId: "inst-1", hostVersion: "0.0.0-test" },
+          apiVersion: 1,
+        },
+      });
+      await expect(nextMessage()).resolves.toMatchObject({ id: 1, result: { ok: true } });
 
-    writeMessage(stdin, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        manifest: { id: "test-plugin", name: "test-plugin", version: "1.0.0" },
-        config: {},
-        instanceInfo: { instanceId: "inst-1", hostVersion: "0.0.0-test" },
-        apiVersion: 1,
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "executeTool",
+        params: {
+          toolName: "check-context",
+          parameters: {},
+          runContext: {
+            agentId: "agent-1",
+            runId: "run-1",
+            companyId: "company-1",
+            projectId: "project-1",
+          },
+        },
+      });
+
+      const configRequest = await nextMessage();
+      expect(configRequest).toMatchObject({
+        method: "config.get",
+        params: { companyId: "company-1" },
+      });
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: configRequest.id,
+        result: { mode: "company-config" },
+      });
+
+      const secretRequest = await nextMessage();
+      expect(secretRequest).toMatchObject({
+        method: "secrets.resolve",
+        params: {
+          secretRef: "77777777-7777-4777-8777-777777777777",
+          companyId: "company-1",
+        },
+      });
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: secretRequest.id,
+        result: "company-secret",
+      });
+
+      await expect(nextMessage()).resolves.toMatchObject({
+        id: 2,
+        result: { content: "company-config:company-secret" },
+      });
+    } finally {
+      host.stop();
+      stdin.end();
+      stdout.destroy();
+    }
+  });
+
+  it("preserves explicit null company context overrides", async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const nextMessage = collectJsonLines(stdout);
+
+    const plugin = definePlugin({
+      async setup(ctx) {
+        ctx.tools.register(
+          "clear-context",
+          {
+            displayName: "Clear Context",
+            description: "Checks explicit null company override propagation",
+            parametersSchema: { type: "object", properties: {} },
+          },
+          async () => {
+            const config = await ctx.config.get({ companyId: null });
+            const token = await ctx.secrets.resolve(
+              "77777777-7777-4777-8777-777777777777",
+              null,
+            );
+            return { content: `${config.mode}:${token}` };
+          },
+        );
       },
     });
-    await expect(nextMessage()).resolves.toMatchObject({ id: 1, result: { ok: true } });
 
-    writeMessage(stdin, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "executeTool",
-      params: {
-        toolName: "check-context",
-        parameters: {},
-        runContext: {
-          agentId: "agent-1",
+    const host = startWorkerRpcHost({ plugin, stdin, stdout });
+    try {
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          manifest: { id: "test-plugin", name: "test-plugin", version: "1.0.0" },
+          config: {},
+          instanceInfo: { instanceId: "inst-1", hostVersion: "0.0.0-test" },
+          apiVersion: 1,
+        },
+      });
+      await expect(nextMessage()).resolves.toMatchObject({ id: 1, result: { ok: true } });
+
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "executeTool",
+        params: {
+          toolName: "clear-context",
+          parameters: {},
+          runContext: {
+            agentId: "agent-1",
+            runId: "run-1",
+            companyId: "company-1",
+            projectId: "project-1",
+          },
+        },
+      });
+
+      const configRequest = await nextMessage();
+      expect(configRequest).toMatchObject({
+        method: "config.get",
+        params: { companyId: null },
+      });
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: configRequest.id,
+        result: { mode: "global-config" },
+      });
+
+      const secretRequest = await nextMessage();
+      expect(secretRequest).toMatchObject({
+        method: "secrets.resolve",
+        params: {
+          secretRef: "77777777-7777-4777-8777-777777777777",
+          companyId: null,
+        },
+      });
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: secretRequest.id,
+        result: "global-secret",
+      });
+
+      await expect(nextMessage()).resolves.toMatchObject({
+        id: 2,
+        result: { content: "global-config:global-secret" },
+      });
+    } finally {
+      host.stop();
+      stdin.end();
+      stdout.destroy();
+    }
+  });
+
+  it("passes session event company context into config host calls", async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const nextMessage = collectJsonLines(stdout);
+
+    const plugin = definePlugin({
+      async setup(ctx) {
+        ctx.data.register("start-session", async () => {
+          await ctx.agents.sessions.sendMessage("session-1", "company-1", {
+            prompt: "hello",
+            onEvent: async () => {
+              await ctx.config.get();
+            },
+          });
+          return { ok: true };
+        });
+      },
+    });
+
+    const host = startWorkerRpcHost({ plugin, stdin, stdout });
+    try {
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          manifest: {
+            id: "test-plugin",
+            name: "test-plugin",
+            version: "1.0.0",
+            capabilities: ["agent.sessions.send"],
+          },
+          config: {},
+          instanceInfo: { instanceId: "inst-1", hostVersion: "0.0.0-test" },
+          apiVersion: 1,
+        },
+      });
+      await expect(nextMessage()).resolves.toMatchObject({ id: 1, result: { ok: true } });
+
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "getData",
+        params: {
+          key: "start-session",
+          companyId: "company-1",
+          params: {},
+        },
+        paperclipInvocation: {
+          id: "invocation-session",
+          scope: { companyId: "company-1" },
+        },
+      });
+
+      const sendMessageRequest = await nextMessage();
+      expect(sendMessageRequest).toMatchObject({
+        method: "agents.sessions.sendMessage",
+        params: {
+          sessionId: "session-1",
+          companyId: "company-1",
+          prompt: "hello",
+        },
+      });
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: sendMessageRequest.id,
+        result: { runId: "run-1" },
+      });
+
+      await expect(nextMessage()).resolves.toMatchObject({
+        id: 2,
+        result: { ok: true },
+      });
+
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        method: "agents.sessions.event",
+        params: {
+          sessionId: "session-1",
           runId: "run-1",
           companyId: "company-1",
-          projectId: "project-1",
+          seq: 1,
+          eventType: "chunk",
+          stream: "stdout",
+          message: "hello",
+          payload: null,
         },
-      },
-    });
+        paperclipInvocation: {
+          id: "invocation-session",
+          scope: { companyId: "company-1" },
+        },
+      });
 
-    const configRequest = await nextMessage();
-    expect(configRequest).toMatchObject({
-      method: "config.get",
-      params: { companyId: "company-1" },
-    });
-    writeMessage(stdin, {
-      jsonrpc: "2.0",
-      id: configRequest.id,
-      result: { mode: "company-config" },
-    });
-
-    const secretRequest = await nextMessage();
-    expect(secretRequest).toMatchObject({
-      method: "secrets.resolve",
-      params: {
-        secretRef: "77777777-7777-4777-8777-777777777777",
-        companyId: "company-1",
-      },
-    });
-    writeMessage(stdin, {
-      jsonrpc: "2.0",
-      id: secretRequest.id,
-      result: "company-secret",
-    });
-
-    await expect(nextMessage()).resolves.toMatchObject({
-      id: 2,
-      result: { content: "company-config:company-secret" },
-    });
-
-    host.stop();
+      const configRequest = await nextMessage();
+      expect(configRequest).toMatchObject({
+        method: "config.get",
+        params: { companyId: "company-1" },
+        paperclipInvocationId: "invocation-session",
+      });
+      writeMessage(stdin, {
+        jsonrpc: "2.0",
+        id: configRequest.id,
+        result: { mode: "company-config" },
+      });
+    } finally {
+      host.stop();
+      stdin.end();
+      stdout.destroy();
+    }
   });
 });

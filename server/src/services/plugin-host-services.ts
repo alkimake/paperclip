@@ -2647,6 +2647,7 @@ export function buildHostServices(
               notifyWorker("agents.sessions.event", {
                 sessionId: params.sessionId,
                 runId: run.id,
+                companyId,
                 seq: (payload.seq as number) ?? 0,
                 eventType: "chunk",
                 stream: (payload.stream as string) ?? null,
@@ -2659,6 +2660,7 @@ export function buildHostServices(
                 notifyWorker("agents.sessions.event", {
                   sessionId: params.sessionId,
                   runId: run.id,
+                  companyId,
                   seq: 0,
                   eventType: status === "succeeded" ? "done" : "error",
                   stream: "system",
@@ -2670,6 +2672,7 @@ export function buildHostServices(
                 notifyWorker("agents.sessions.event", {
                   sessionId: params.sessionId,
                   runId: run.id,
+                  companyId,
                   seq: 0,
                   eventType: "status",
                   stream: "system",

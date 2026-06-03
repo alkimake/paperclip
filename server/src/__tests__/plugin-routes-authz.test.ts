@@ -86,7 +86,9 @@ async function createApp(
     next();
   });
   app.use("/api", pluginRoutes(
-    (routeOverrides.db ?? {}) as never,
+    (routeOverrides.db ?? {
+      transaction: async <T>(callback: (tx: unknown) => Promise<T>) => callback({}),
+    }) as never,
     loader as never,
     routeOverrides.jobDeps as never,
     undefined,
@@ -363,7 +365,9 @@ describe.sequential("plugin install and upgrade authz", () => {
     const { app } = await createApp(boardActor({
       isInstanceAdmin: true,
       companyIds: [companyA],
-    }));
+    }), {}, {
+      bridgeDeps: { workerManager: mockWorkerManager },
+    });
 
     const res = await request(app)
       .post(`/api/plugins/${pluginId}/config`)
@@ -382,6 +386,7 @@ describe.sequential("plugin install and upgrade authz", () => {
         secretId: "77777777-7777-4777-8777-777777777777",
         configPath: "$",
       }],
+      { db: {} },
     );
     expect(mockRegistry.upsertConfig).toHaveBeenCalledWith(
       pluginId,
@@ -392,6 +397,7 @@ describe.sequential("plugin install and upgrade authz", () => {
       },
       companyA,
     );
+    expect(mockWorkerManager.call).not.toHaveBeenCalled();
   }, 20_000);
 
   it("rejects company-scoped plugin config secret refs that do not belong to the selected company", async () => {
