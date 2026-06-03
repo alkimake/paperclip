@@ -61,4 +61,16 @@ describe("pluginsApi local folders", () => {
       },
     );
   });
+
+  it("passes company scope through config test requests", async () => {
+    await pluginsApi.testConfig("plugin-1", { defaultCompanyId: "company-1" }, "company-1");
+
+    expect(mockApi.post).toHaveBeenCalledWith(
+      "/plugins/plugin-1/config/test",
+      {
+        configJson: { defaultCompanyId: "company-1" },
+        companyId: "company-1",
+      },
+    );
+  });
 });

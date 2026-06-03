@@ -23,6 +23,11 @@ const mockLifecycle = vi.hoisted(() => ({
   disable: vi.fn(),
 }));
 
+const mockWorkerManager = vi.hoisted(() => ({
+  call: vi.fn(),
+  isRunning: vi.fn(() => false),
+}));
+
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
 }));
@@ -435,6 +440,61 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(res.status).toBe(200);
     expect(mockRegistry.getConfig).toHaveBeenCalledWith(pluginId, companyA);
     expect(res.body.configJson).toEqual({ botName: "company-a" });
+  }, 20_000);
+
+  it("rejects plugin config tests with secret refs when company scope is missing", async () => {
+    readyPlugin();
+
+    const { app } = await createApp(boardActor({
+      isInstanceAdmin: true,
+      companyIds: [companyA],
+    }), {}, {
+      bridgeDeps: { workerManager: mockWorkerManager },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/config/test`)
+      .send({
+        configJson: {
+          apiKeyRef: "77777777-7777-4777-8777-777777777777",
+        },
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/secret references require companyId/i);
+    expect(mockWorkerManager.call).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it("passes company-scoped plugin config tests through when companyId is provided", async () => {
+    readyPlugin();
+    mockWorkerManager.call.mockResolvedValueOnce({ ok: true, warnings: [] });
+
+    const { app } = await createApp(boardActor({
+      isInstanceAdmin: true,
+      companyIds: [companyA],
+    }), {}, {
+      bridgeDeps: { workerManager: mockWorkerManager },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/config/test`)
+      .send({
+        companyId: companyA,
+        configJson: {
+          apiKeyRef: "77777777-7777-4777-8777-777777777777",
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockWorkerManager.call).toHaveBeenCalledWith(
+      pluginId,
+      "validateConfig",
+      {
+        config: {
+          apiKeyRef: "77777777-7777-4777-8777-777777777777",
+        },
+      },
+    );
   }, 20_000);
 
   it("allows instance admins to upgrade plugins", async () => {

@@ -10,6 +10,7 @@ import { pluginsApi, type PluginLocalFolderStatus } from "@/api/plugins";
 import { queryKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
 import { ChoosePathButton } from "@/components/PathInstructionsModal";
 import {
   Card,
@@ -19,6 +20,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { PageTabBar } from "@/components/PageTabBar";
 import {
@@ -60,7 +62,7 @@ import {
  * @see doc/plugins/PLUGIN_SPEC.md §19.8 — Plugin Settings UI.
  */
 export function PluginSettings() {
-  const { selectedCompany, selectedCompanyId } = useCompany();
+  const { companies, selectedCompany, selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const { companyPrefix, pluginId } = useParams<{ companyPrefix?: string; pluginId: string }>();
   const [activeTab, setActiveTab] = useState<"configuration" | "status">("configuration");
@@ -246,6 +248,7 @@ export function PluginSettings() {
                 <PluginConfigForm
                   pluginId={pluginId!}
                   companyId={selectedCompanyId}
+                  companies={companiesForSelector(companies)}
                   schema={configSchema!}
                   initialValues={configData?.configJson}
                   isLoading={configLoading}
@@ -658,7 +661,7 @@ function PluginLocalFolderRow({ pluginId, companyId, declaration, status }: Plug
         requiredDirectories: declaration.requiredDirectories,
         requiredFiles: declaration.requiredFiles,
       }),
-    onSuccess: (nextStatus) => {
+    onSuccess: (nextStatus: PluginLocalFolderStatus) => {
       setMessage({
         type: nextStatus.healthy ? "success" : "error",
         text: nextStatus.healthy
@@ -921,6 +924,7 @@ function isLikelyAbsolutePath(pathValue: string) {
 interface PluginConfigFormProps {
   pluginId: string;
   companyId?: string | null;
+  companies: CompanyOption[];
   schema: JsonSchemaNode;
   initialValues?: Record<string, unknown>;
   isLoading?: boolean;
@@ -937,13 +941,16 @@ interface PluginConfigFormProps {
  * Separated from PluginSettings to isolate re-render scope — only the form
  * re-renders on field changes, not the entire page.
  */
-function PluginConfigForm({ pluginId, companyId, schema, initialValues, isLoading, pluginStatus, supportsConfigTest }: PluginConfigFormProps) {
+function PluginConfigForm({ pluginId, companyId, companies, schema, initialValues, isLoading, pluginStatus, supportsConfigTest }: PluginConfigFormProps) {
   const queryClient = useQueryClient();
+  const companyFields = getCompanyConfigFields(schema);
+  const formSchema = omitSchemaProperties(schema, companyFields.map((field) => field.key));
 
   // Form values: start with saved values, fall back to schema defaults
   const [values, setValues] = useState<Record<string, unknown>>(() => ({
     ...getDefaultValues(schema),
     ...(initialValues ?? {}),
+    ...getCompanyFieldDefaults(companyFields, initialValues, companyId),
   }));
 
   // Sync when saved config loads asynchronously — only on first load so we
@@ -956,9 +963,10 @@ function PluginConfigForm({ pluginId, companyId, schema, initialValues, isLoadin
       setValues({
         ...getDefaultValues(schema),
         ...initialValues,
+        ...getCompanyFieldDefaults(companyFields, initialValues, companyId),
       });
     }
-  }, [initialValues, schema]);
+  }, [companyFields, companyId, initialValues, schema]);
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveMessage, setSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -989,8 +997,8 @@ function PluginConfigForm({ pluginId, companyId, schema, initialValues, isLoadin
   // Test configuration mutation
   const testMutation = useMutation({
     mutationFn: (configJson: Record<string, unknown>) =>
-      pluginsApi.testConfig(pluginId, configJson),
-    onSuccess: (result) => {
+      pluginsApi.testConfig(pluginId, configJson, companyId),
+    onSuccess: (result: { valid: boolean; message?: string }) => {
       if (result.valid) {
         setTestResult({ type: "success", text: "Configuration test passed." });
       } else {
@@ -1043,13 +1051,33 @@ function PluginConfigForm({ pluginId, companyId, schema, initialValues, isLoadin
 
   return (
     <div className="space-y-4">
-      <JsonSchemaForm
-        schema={schema}
-        values={values}
-        onChange={handleChange}
-        errors={errors}
-        disabled={saveMutation.isPending}
-      />
+      {companyFields.length > 0 ? (
+        <div className="space-y-4">
+          {companyFields.map(({ key, schema: fieldSchema }) => (
+            <CompanyConfigField
+              key={key}
+              fieldKey={key}
+              schema={fieldSchema}
+              value={values[key]}
+              companies={companies}
+              disabled={saveMutation.isPending}
+              error={errors[`/${key}`]}
+              required={(schema.required ?? []).includes(key)}
+              onChange={(nextValue) => handleChange({ ...values, [key]: nextValue })}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {formSchema.properties && Object.keys(formSchema.properties).length > 0 ? (
+        <JsonSchemaForm
+          schema={formSchema}
+          values={values}
+          onChange={handleChange}
+          errors={errors}
+          disabled={saveMutation.isPending}
+        />
+      ) : null}
 
       {/* Status messages */}
       {saveMessage && (
@@ -1110,6 +1138,135 @@ function PluginConfigForm({ pluginId, companyId, schema, initialValues, isLoadin
           </Button>
         )}
       </div>
+    </div>
+  );
+}
+
+type CompanyOption = {
+  id: string;
+  name: string;
+};
+
+type CompanyConfigFieldDescriptor = {
+  key: string;
+  schema: JsonSchemaNode;
+};
+
+function companiesForSelector(companies: Array<{ id: string; name: string }>): CompanyOption[] {
+  return companies.map((company) => ({ id: company.id, name: company.name }));
+}
+
+function normalizeCompanyFieldToken(value: string | undefined): string {
+  return (value ?? "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function isCompanyConfigField(key: string, schema: JsonSchemaNode): boolean {
+  const explicitResource = schema["x-paperclip-resource"];
+  if (explicitResource === "company") return true;
+  if (resolveJsonSchemaType(schema) !== "string") return false;
+  const normalizedKey = normalizeCompanyFieldToken(key);
+  const normalizedTitle = normalizeCompanyFieldToken(schema.title);
+  return normalizedKey.endsWith("companyid") || normalizedTitle.endsWith("companyid");
+}
+
+function getCompanyConfigFields(schema: JsonSchemaNode): CompanyConfigFieldDescriptor[] {
+  return Object.entries(schema.properties ?? {})
+    .filter(([key, propSchema]) => isCompanyConfigField(key, propSchema))
+    .map(([key, propSchema]) => ({ key, schema: propSchema }));
+}
+
+function getCompanyFieldDefaults(
+  companyFields: CompanyConfigFieldDescriptor[],
+  initialValues: Record<string, unknown> | undefined,
+  activeCompanyId: string | null | undefined,
+): Record<string, unknown> {
+  if (!activeCompanyId) return {};
+  const defaults: Record<string, unknown> = {};
+  for (const field of companyFields) {
+    const existingValue = initialValues?.[field.key];
+    if (typeof existingValue === "string" && existingValue.trim().length > 0) continue;
+    defaults[field.key] = activeCompanyId;
+  }
+  return defaults;
+}
+
+function omitSchemaProperties(schema: JsonSchemaNode, keysToOmit: string[]): JsonSchemaNode {
+  if (keysToOmit.length === 0 || !schema.properties) return schema;
+
+  const keySet = new Set(keysToOmit);
+  const nextProperties = Object.fromEntries(
+    Object.entries(schema.properties).filter(([key]) => !keySet.has(key)),
+  );
+  const nextRequired = (schema.required ?? []).filter((key) => !keySet.has(key));
+
+  return {
+    ...schema,
+    properties: nextProperties,
+    ...(schema.required ? { required: nextRequired } : {}),
+  };
+}
+
+function resolveJsonSchemaType(schema: JsonSchemaNode): string {
+  if (Array.isArray(schema.type)) {
+    return schema.type.find((value) => value !== "null") ?? "string";
+  }
+  return schema.type ?? "string";
+}
+
+interface CompanyConfigFieldProps {
+  fieldKey: string;
+  schema: JsonSchemaNode;
+  value: unknown;
+  companies: CompanyOption[];
+  disabled: boolean;
+  error?: string;
+  required: boolean;
+  onChange: (value: string) => void;
+}
+
+function CompanyConfigField({
+  fieldKey,
+  schema,
+  value,
+  companies,
+  disabled,
+  error,
+  required,
+  onChange,
+}: CompanyConfigFieldProps) {
+  const fieldValue = typeof value === "string" ? value : "";
+  const label = schema.title ?? fieldKey.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ");
+  const hasKnownValue = companies.some((company) => company.id === fieldValue);
+  const placeholder = companies.length === 0 ? "No companies available" : "Select a company";
+  const selectValue = fieldValue || undefined;
+
+  return (
+    <div className="space-y-2">
+      <Label className="text-sm font-medium">
+        {label}
+        {required ? <span className="ml-1 text-destructive">*</span> : null}
+      </Label>
+      <Select value={selectValue} onValueChange={onChange} disabled={disabled || companies.length === 0}>
+        <SelectTrigger className="w-full" aria-label={label}>
+          <SelectValue placeholder={placeholder} />
+        </SelectTrigger>
+        <SelectContent>
+          {!hasKnownValue && fieldValue ? (
+            <SelectItem value={fieldValue}>
+              {fieldValue}
+            </SelectItem>
+          ) : null}
+          {companies.map((company) => (
+            <SelectItem key={company.id} value={company.id}>
+              {company.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {schema.description ? (
+        <p className="text-[12px] text-muted-foreground leading-relaxed">{schema.description}</p>
+      ) : null}
+      {error ? <p className="text-[12px] font-medium text-destructive">{error}</p> : null}
     </div>
   );
 }

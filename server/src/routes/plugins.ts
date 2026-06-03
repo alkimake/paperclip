@@ -2298,11 +2298,12 @@ export function pluginRoutes(
       return;
     }
 
-    const body = req.body as { configJson?: Record<string, unknown> } | undefined;
+    const body = req.body as { configJson?: Record<string, unknown>; companyId?: string } | undefined;
     if (!body?.configJson || typeof body.configJson !== "object") {
       res.status(400).json({ error: '"configJson" is required and must be an object' });
       return;
     }
+    const companyId = resolvePluginConfigCompanyId(req);
 
     // Fast schema-level rejection before hitting the worker RPC.
     const schema = plugin.manifestJson?.instanceConfigSchema;
@@ -2318,6 +2319,11 @@ export function pluginRoutes(
     }
 
     try {
+      const secretRefsByPath = extractSecretRefPathsFromConfig(body.configJson, schema);
+      if (secretRefsByPath.size > 0 && !companyId) {
+        res.status(422).json({ error: "Plugin secret references require companyId" });
+        return;
+      }
       const result = await bridgeDeps.workerManager.call(
         plugin.id,
         "validateConfig",

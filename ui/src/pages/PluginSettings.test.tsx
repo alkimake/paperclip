@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +11,8 @@ const mockPluginsApi = vi.hoisted(() => ({
   dashboard: vi.fn(),
   logs: vi.fn(),
   getConfig: vi.fn(),
+  saveConfig: vi.fn(),
+  testConfig: vi.fn(),
   listLocalFolders: vi.fn(),
   configureLocalFolder: vi.fn(),
 }));
@@ -30,6 +31,7 @@ vi.mock("@/context/BreadcrumbContext", () => ({
 
 vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({
+    companies: [{ id: "company-1", name: "Paperclip", issuePrefix: "PAP" }],
     selectedCompany: { id: "company-1", name: "Paperclip", issuePrefix: "PAP" },
     selectedCompanyId: "company-1",
   }),
@@ -54,10 +56,17 @@ vi.mock("@/components/PageTabBar", () => ({
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 async function flushReact() {
-  await act(async () => {
-    await Promise.resolve();
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
-  });
+  await Promise.resolve();
+  await new Promise((resolve) => window.setTimeout(resolve, 10));
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 500) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await flushReact();
+  }
+  throw new Error("Timed out waiting for UI to settle");
 }
 
 function basePlugin(overrides: Record<string, unknown> = {}) {
@@ -124,13 +133,12 @@ async function renderSettings(container: HTMLDivElement) {
     defaultOptions: { queries: { retry: false } },
   });
 
-  await act(async () => {
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <PluginSettings />
-      </QueryClientProvider>,
-    );
-  });
+  root.render(
+    <QueryClientProvider client={queryClient}>
+      <PluginSettings />
+    </QueryClientProvider>,
+  );
+  await waitFor(() => !container.textContent?.includes("Loading plugin details..."));
   await flushReact();
   await flushReact();
   return root;
@@ -147,6 +155,9 @@ describe("PluginSettings", () => {
     mockPluginsApi.dashboard.mockResolvedValue(null);
     mockPluginsApi.health.mockResolvedValue({ pluginId: "plugin-1", status: "ready", healthy: true, checks: [] });
     mockPluginsApi.logs.mockResolvedValue([]);
+    mockPluginsApi.getConfig.mockResolvedValue(null);
+    mockPluginsApi.saveConfig.mockResolvedValue({});
+    mockPluginsApi.testConfig.mockResolvedValue({ valid: true });
     mockPluginsApi.listLocalFolders.mockResolvedValue({
       pluginId: "plugin-1",
       companyId: "company-1",
@@ -169,9 +180,7 @@ describe("PluginSettings", () => {
     const link = container.querySelector('a[href="/company/settings/environments"]');
     expect(link?.textContent).toContain("Open Company Environments");
 
-    await act(async () => {
-      root.unmount();
-    });
+    root.unmount();
   });
 
   it("renders unconfigured manifest local folders with required paths", async () => {
@@ -205,9 +214,7 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("Missing directories: raw, wiki");
     expect(container.textContent).toContain("Missing files: WIKI.md, index.md");
 
-    await act(async () => {
-      root.unmount();
-    });
+    root.unmount();
   });
 
   it("renders invalid configured folders with validation problems", async () => {
@@ -247,9 +254,7 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("Required file is missing.");
     expect(container.textContent).toContain("Missing files: WIKI.md");
 
-    await act(async () => {
-      root.unmount();
-    });
+    root.unmount();
   });
 
   it("does not render required paths as present when the configured root cannot be inspected", async () => {
@@ -286,9 +291,7 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("Configured root was not inspected.");
     expect(container.textContent).not.toContain("Present");
 
-    await act(async () => {
-      root.unmount();
-    });
+    root.unmount();
   });
 
   it("renders healthy folders without validation problems", async () => {
@@ -330,8 +333,72 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("Present");
     expect(container.textContent).not.toContain("Validation problems");
 
-    await act(async () => {
-      root.unmount();
-    });
+    root.unmount();
+  });
+
+  it("renders company-like config fields as selectors and scopes save/test requests", async () => {
+    mockPluginsApi.get.mockResolvedValue(basePlugin({
+      status: "ready",
+      supportsConfigTest: true,
+      manifestJson: {
+        displayName: "Forgejo Sync",
+        version: "0.1.0",
+        description: "Syncs Forgejo issues.",
+        author: "Paperclip",
+        capabilities: [],
+        instanceConfigSchema: {
+          type: "object",
+          required: ["defaultCompanyId"],
+          properties: {
+            defaultCompanyId: {
+              type: "string",
+              title: "Default Company ID",
+              description: "Which company this plugin should target by default.",
+            },
+            baseUrl: {
+              type: "string",
+              title: "Base URL",
+            },
+          },
+        },
+      },
+    }));
+
+    const root = await renderSettings(container);
+
+    expect(container.textContent).toContain("Paperclip");
+    expect(container.querySelector('input[aria-label="Default Company ID"]')).toBeNull();
+    const selector = container.querySelector('[aria-label="Default Company ID"]');
+    expect(selector?.textContent).toContain("Paperclip");
+
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const saveButton = buttons.find((button) => button.textContent?.includes("Save Configuration"));
+    const testButton = buttons.find((button) => button.textContent?.includes("Test Configuration"));
+    expect(saveButton).toBeTruthy();
+    expect(testButton).toBeTruthy();
+
+    saveButton?.click();
+    await flushReact();
+
+    expect(mockPluginsApi.saveConfig).toHaveBeenCalledWith(
+      "plugin-1",
+      {
+        defaultCompanyId: "company-1",
+      },
+      "company-1",
+    );
+
+    testButton?.click();
+    await flushReact();
+
+    expect(mockPluginsApi.testConfig).toHaveBeenCalledWith(
+      "plugin-1",
+      {
+        defaultCompanyId: "company-1",
+      },
+      "company-1",
+    );
+
+    root.unmount();
   });
 });
