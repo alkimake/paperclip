@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { resolveDefaultSecretsKeyFilePath } from "../home-paths.js";
+import { resolveDefaultSecretsKeyFilePath, resolvePaperclipInstanceId } from "../home-paths.js";
 import type {
   PreparedSecretVersion,
   SecretProviderHealthCheck,
@@ -21,7 +22,24 @@ interface LocalEncryptedMaterial extends StoredSecretVersionMaterial {
 function resolveMasterKeyFilePath() {
   const fromEnv = process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
   if (fromEnv && fromEnv.trim().length > 0) return path.resolve(fromEnv.trim());
-  return resolveDefaultSecretsKeyFilePath();
+  const preferredDefault = resolveDefaultSecretsKeyFilePath();
+  if (process.env.PAPERCLIP_HOME?.trim()) return preferredDefault;
+
+  // Backwards compatibility for deployments that historically stored instance
+  // data directly under $HOME/instances/<id> and later restarted without an
+  // explicit PAPERCLIP_HOME. Prefer the legacy key when it already exists so
+  // previously encrypted secrets remain decryptable.
+  const legacyDefault = path.resolve(
+    os.homedir(),
+    "instances",
+    resolvePaperclipInstanceId(),
+    "secrets",
+    "master.key",
+  );
+  if (legacyDefault !== preferredDefault && existsSync(legacyDefault)) {
+    return legacyDefault;
+  }
+  return preferredDefault;
 }
 
 function decodeMasterKey(raw: string): Buffer | null {
